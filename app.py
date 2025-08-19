@@ -62,103 +62,143 @@ def extract_text_from_pdf(pdf_file):
     except Exception as e:
         return "", f"PDFエラー: {str(e)}"
 
-def extract_work_hours(text):
-    """改善された勤務時間抽出機能"""
-    # デバッグ情報を表示用に保存
+def extract_work_hours_smart(text):
+    """スマートな勤務時間抽出機能 - 優先順位と重複除去"""
     debug_info = []
+    all_matches = {}  # パターン別の検出結果
     
-    # より包括的な正規表現パターン
-    patterns = [
-        # 基本パターン（コロンあり）
-        r'合計[:\s：]*(\d+\.?\d*)[時間hH]*',
-        r'総時間[:\s：]*(\d+\.?\d*)[時間hH]*',
-        r'勤務時間[:\s：]*(\d+\.?\d*)[時間hH]*',
-        r'実働[:\s：]*(\d+\.?\d*)[時間hH]*',
-        r'実際[:\s：]*(\d+\.?\d*)[時間hH]*',
+    # 優先順位付きパターン（重要な順）
+    priority_patterns = [
+        # 最優先: 明確に「勤務時間」と書かれたもの
+        ('最重要', r'勤務時間[:\s：]*(\d+\.?\d*)[時間hH]*', '勤務時間'),
+        ('最重要', r'総勤務時間[:\s：]*(\d+\.?\d*)[時間hH]*', '総勤務時間'),
         
-        # 空白を含むパターン
-        r'合計\s*[:\s：]\s*(\d+\.?\d*)\s*[時間hH]*',
-        r'勤務時間\s*[:\s：]\s*(\d+\.?\d*)\s*[時間hH]*',
-        r'総時間\s*[:\s：]\s*(\d+\.?\d*)\s*[時間hH]*',
+        # 高優先: 合計系
+        ('高優先', r'合計[:\s：]*(\d+\.?\d*)[時間hH]*', '合計'),
+        ('高優先', r'総時間[:\s：]*(\d+\.?\d*)[時間hH]*', '総時間'),
         
-        # コロンなしパターン
-        r'合計(\d+\.?\d*)[時間hH]',
-        r'勤務時間(\d+\.?\d*)[時間hH]',
-        r'総時間(\d+\.?\d*)[時間hH]',
-        r'実働(\d+\.?\d*)[時間hH]',
+        # 中優先: その他の時間項目
+        ('中優先', r'実働[:\s：]*(\d+\.?\d*)[時間hH]*', '実働時間'),
+        ('中優先', r'実際[:\s：]*(\d+\.?\d*)[時間hH]*', '実際時間'),
         
-        # 「○○時間」形式
-        r'(\d+\.?\d+)\s*[時間hH]',
-        r'(\d+)\s*[時間hH]',
+        # 低優先: 一般的なパターン（慎重に）
+        ('低優先', r'(\d+\.?\d+)\s*時間', '○○時間形式'),
         
-        # 時間:分形式（複数パターン）
-        r'(\d+)[時:](\d+)[分]?',
-        r'(\d+)[時時間](\d+)[分]',
-        
-        # より柔軟なパターン
-        r'時間.*?(\d+\.?\d+)',
-        r'合計.*?(\d+\.?\d+)',
-        
-        # 数値のみ（2-3桁で時間として妥当そうなもの）
-        r'\b(\d{2,3}\.\d+)\b',  # 176.5のような形式
-        r'\b(1[0-9]{2}|2[0-4][0-9])\b',  # 100-249の範囲
+        # 最低優先: 時間:分形式のみ
+        ('最低優先', r'(\d+)[時:](\d+)[分]?', '時間:分形式'),
     ]
     
-    results = []
-    
-    # デバッグ情報
     debug_info.append(f"抽出対象テキスト（最初の300文字）: {text[:300]}...")
     
-    for i, pattern in enumerate(patterns):
+    for priority, pattern, description in priority_patterns:
         try:
             matches = re.findall(pattern, text, re.IGNORECASE)
             if matches:
-                debug_info.append(f"パターン{i+1} '{pattern}' → {matches}")
-            
-            for match in matches:
-                try:
-                    if isinstance(match, tuple) and len(match) == 2:
-                        # 時間:分 形式
-                        hours = float(match[0]) + float(match[1]) / 60
-                        if 0.1 <= hours <= 24:
-                            results.append(round(hours, 2))
-                            debug_info.append(f"時間:分形式で追加: {hours}時間")
-                    else:
-                        hours = float(match)
-                        # 勤務時間として妥当な範囲（0.1時間〜500時間）
-                        if 0.1 <= hours <= 500:
-                            results.append(round(hours, 2))
-                            debug_info.append(f"数値として追加: {hours}時間")
-                except ValueError:
-                    continue
+                debug_info.append(f"[{priority}] {description} '{pattern}' → {matches}")
+                
+                for match in matches:
+                    try:
+                        if isinstance(match, tuple) and len(match) == 2:
+                            # 時間:分 形式
+                            hours = float(match[0]) + float(match[1]) / 60
+                            if 1 <= hours <= 24:  # 1日の妥当な勤務時間
+                                if priority not in all_matches:
+                                    all_matches[priority] = []
+                                all_matches[priority].append({
+                                    'value': round(hours, 2),
+                                    'description': f"{description}({match[0]}:{match[1]})",
+                                    'pattern': pattern
+                                })
+                        else:
+                            hours = float(match)
+                            # より厳密な範囲チェック
+                            if priority == '最重要' and 50 <= hours <= 500:  # 月間勤務時間
+                                if priority not in all_matches:
+                                    all_matches[priority] = []
+                                all_matches[priority].append({
+                                    'value': round(hours, 2),
+                                    'description': description,
+                                    'pattern': pattern
+                                })
+                            elif priority == '高優先' and 50 <= hours <= 500:  # 月間勤務時間
+                                if priority not in all_matches:
+                                    all_matches[priority] = []
+                                all_matches[priority].append({
+                                    'value': round(hours, 2),
+                                    'description': description,
+                                    'pattern': pattern
+                                })
+                            elif priority == '中優先' and 40 <= hours <= 400:  # 実働時間
+                                if priority not in all_matches:
+                                    all_matches[priority] = []
+                                all_matches[priority].append({
+                                    'value': round(hours, 2),
+                                    'description': description,
+                                    'pattern': pattern
+                                })
+                            elif priority == '低優先' and 1 <= hours <= 300:  # 一般的な時間
+                                if priority not in all_matches:
+                                    all_matches[priority] = []
+                                all_matches[priority].append({
+                                    'value': round(hours, 2),
+                                    'description': description,
+                                    'pattern': pattern
+                                })
+                    except ValueError:
+                        continue
         except Exception as e:
-            debug_info.append(f"パターン{i+1}でエラー: {str(e)}")
+            debug_info.append(f"[{priority}] パターンエラー: {str(e)}")
             continue
     
-    # 重複除去
-    unique_results = sorted(list(set(results)))
-    debug_info.append(f"最終結果: {unique_results}")
+    # 優先順位に基づいて最適な値を選択
+    selected_values = []
+    
+    # 優先順位順に処理
+    for priority in ['最重要', '高優先', '中優先', '低優先', '最低優先']:
+        if priority in all_matches:
+            # 重複除去（同じ値は除外）
+            unique_values = []
+            seen_values = set()
+            
+            for item in all_matches[priority]:
+                if item['value'] not in seen_values:
+                    unique_values.append(item)
+                    seen_values.add(item['value'])
+            
+            if unique_values:
+                debug_info.append(f"[{priority}] 採用: {[item['value'] for item in unique_values]}")
+                selected_values.extend([item['value'] for item in unique_values])
+                
+                # 最重要・高優先で見つかったら、それ以下は無視
+                if priority in ['最重要', '高優先'] and len(unique_values) >= 1:
+                    debug_info.append(f"[決定] {priority}レベルで十分なデータが見つかったため、以下の優先度は無視")
+                    break
+    
+    # 最終的な重複除去
+    final_results = sorted(list(set(selected_values)))
+    
+    # 結果が多すぎる場合は、最も大きい値を採用（月間勤務時間として妥当）
+    if len(final_results) > 3:
+        final_results = final_results[-2:]  # 最大2つまで
+        debug_info.append(f"結果を絞り込み: 最大値付近を採用")
+    
+    debug_info.append(f"最終選択結果: {final_results}")
     
     # デバッグ情報をセッション状態に保存
     if 'debug_info' not in st.session_state:
         st.session_state.debug_info = {}
     st.session_state.debug_info[text[:50]] = debug_info
     
-    return unique_results
+    return final_results
 
 def extract_employee_name(text):
-    """社員名を抽出（改善版）"""
+    """社員名を抽出"""
     name_patterns = [
         r'氏名[:\s：]*([^\s\n\r]+)',
         r'名前[:\s：]*([^\s\n\r]+)',
         r'社員名[:\s：]*([^\s\n\r]+)',
         r'派遣者[:\s：]*([^\s\n\r]+)',
         r'作業者[:\s：]*([^\s\n\r]+)',
-        r'社員[:\s：]*([^\s\n\r]+)',
-        
-        # より柔軟なパターン
-        r'氏名\s*[:\s：]\s*([^\s\n\r]+)',
-        r'名前\s*[:\s：]\s*([^\s\n\r]+)',
     ]
     
     for pattern in name_patterns:
@@ -185,7 +225,7 @@ def process_file(uploaded_file):
     if error:
         return None, error
     
-    work_hours = extract_work_hours(text)
+    work_hours = extract_work_hours_smart(text)  # スマート版を使用
     employee_name = extract_employee_name(text)
     
     return {
@@ -209,8 +249,8 @@ def create_excel_output(df):
 
 def main():
     # ヘッダー
-    st.title("⏰ 勤務時間突合ツール（改善版）")
-    st.markdown("**時間抽出機能を強化しました - より多くのフォーマットに対応**")
+    st.title("⏰ 勤務時間突合ツール（スマート版）")
+    st.markdown("**優先順位付き時間抽出 - 重複を排除して最適な値を選択**")
     
     # システム状態
     with st.expander("🔧 システム情報"):
@@ -224,11 +264,11 @@ def main():
                 st.write("❌ PDFファイル (制限あり)")
         
         with col2:
-            st.write("**改善された機能:**")
-            st.write("✅ 日本語コロン（：）対応")
-            st.write("✅ 空白を含むフォーマット対応")
-            st.write("✅ より柔軟な時間抽出")
-            st.write("✅ デバッグ情報表示")
+            st.write("**スマート機能:**")
+            st.write("✅ 優先順位付き抽出")
+            st.write("✅ 重複除去")
+            st.write("✅ 妥当性チェック")
+            st.write("✅ 最適値選択")
     
     st.markdown("---")
     
@@ -270,18 +310,18 @@ def main():
         st.info("👆 サイドバーからファイルをアップロードして処理を開始してください")
         
         # 使用例
-        with st.expander("📖 改善された機能について"):
+        with st.expander("📖 スマート抽出について"):
             st.write("""
-            **新しく対応したフォーマット:**
-            - 勤務時間：176.5時間（日本語コロン）
-            - 合計 176.5 時間（空白を含む）
-            - 176.5時間（シンプル形式）
-            - 8時間30分（時分形式）
+            **優先順位システム:**
+            1. **最重要**: 勤務時間、総勤務時間
+            2. **高優先**: 合計、総時間
+            3. **中優先**: 実働時間、実際時間
+            4. **低優先**: ○○時間形式
             
-            **デバッグ機能:**
-            - 抽出されたテキストの詳細表示
-            - どのパターンでマッチしたかの表示
-            - より詳細なエラー情報
+            **自動選択:**
+            - 重複する値を除去
+            - 最も信頼性の高い値を採用
+            - 妥当性チェックで適切な範囲の値のみ選択
             """)
 
 def process_files(uploaded_files):
@@ -299,8 +339,10 @@ def process_files(uploaded_files):
         else:
             st.session_state.processed_files.append(result)
             work_hours_count = len(result['work_hours'])
+            work_hours_total = sum(result['work_hours']) if result['work_hours'] else 0
+            
             if work_hours_count > 0:
-                st.success(f"✅ {uploaded_file.name}: 処理完了（{work_hours_count}個の時間データ検出）")
+                st.success(f"✅ {uploaded_file.name}: 処理完了（{work_hours_total:.1f}時間、{work_hours_count}個検出）")
             else:
                 st.warning(f"⚠️ {uploaded_file.name}: 処理完了（時間データ未検出）")
         
@@ -345,7 +387,7 @@ def display_results():
             st.error("Excel出力機能が利用できません")
     
     # 詳細表示
-    if st.button("🔍 詳細表示＋デバッグ情報"):
+    if st.button("🔍 詳細表示＋スマートデバッグ"):
         st.subheader("🔍 詳細情報")
         
         for i, file_data in enumerate(st.session_state.processed_files):
@@ -357,18 +399,30 @@ def display_results():
                     st.write(f"**処理日時:** {file_data['processed_at']}")
                     
                     if file_data['work_hours']:
-                        st.write(f"**検出された時間:** {file_data['work_hours']}")
+                        st.write(f"**選択された時間:** {file_data['work_hours']}")
                         st.write(f"**合計時間:** {sum(file_data['work_hours']):.2f}時間")
+                        
+                        # 推奨される主要な値
+                        if len(file_data['work_hours']) > 1:
+                            main_value = max(file_data['work_hours'])
+                            st.info(f"💡 推奨メイン値: {main_value}時間")
                     else:
                         st.warning("勤務時間が検出されませんでした")
                         
-                    # デバッグ情報表示
+                    # スマートデバッグ情報表示
                     if 'debug_info' in st.session_state:
                         text_key = file_data['raw_text'][:50]
                         if text_key in st.session_state.debug_info:
-                            with st.expander("🐛 デバッグ情報"):
+                            with st.expander("🧠 スマートデバッグ情報"):
                                 for debug_line in st.session_state.debug_info[text_key]:
-                                    st.text(debug_line)
+                                    if '最重要' in debug_line:
+                                        st.success(debug_line)
+                                    elif '高優先' in debug_line:
+                                        st.info(debug_line)
+                                    elif '決定' in debug_line:
+                                        st.warning(debug_line)
+                                    else:
+                                        st.text(debug_line)
                 
                 with col2:
                     st.text_area(
