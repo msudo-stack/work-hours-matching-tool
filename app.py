@@ -15,7 +15,7 @@ except ImportError:
 
 # ページ設定
 st.set_page_config(
-    page_title="勤務時間突合ツール",
+    page_title="勤務時間突合ツール（複数人対応版）",
     page_icon="⏰",
     layout="wide"
 )
@@ -62,8 +62,132 @@ def extract_text_from_pdf(pdf_file):
     except Exception as e:
         return "", f"PDFエラー: {str(e)}"
 
+def extract_multiple_employees_from_table(text):
+    """表形式から複数人の勤務データを抽出"""
+    debug_info = []
+    employees_data = []
+    
+    debug_info.append(f"表形式解析開始: {text[:200]}...")
+    
+    # パターン1: 表形式（横並び）の検出
+    table_patterns = [
+        r'│([^│\n\r]+)│[^│]*?(\d+\.?\d*)[時間hH]*[^│]*?│',  # │名前│...│時間│
+        r'([^\|\n\r\t]+)[\|\t]\s*\d+[日]*[\|\t]\s*(\d+\.?\d*)[時間hH]*',  # 名前|日数|時間
+        r'([^\n\r\t]+)\s+(\d+\.?\d*)[時間hH]+',  # 名前 時間
+    ]
+    
+    # パターン2: リスト形式の検出
+    list_patterns = [
+        r'([^\n\r]+?)\s+勤務時間[:\s：]*(\d+\.?\d*)[時間hH]*',
+        r'([^\n\r]+?)[:\s：]+(\d+\.?\d*)[時間hH]+',
+        r'([^\n\r]+?)\s+(\d+\.?\d*)[時間hH]+',
+    ]
+    
+    # パターン3: 縦並び形式の検出  
+    vertical_patterns = [
+        r'氏名[:\s：]*([^\n\r]+).*?勤務時間[:\s：]*(\d+\.?\d*)[時間hH]*',
+        r'社員名[:\s：]*([^\n\r]+).*?勤務時間[:\s：]*(\d+\.?\d*)[時間hH]*',
+        r'名前[:\s：]*([^\n\r]+).*?勤務時間[:\s：]*(\d+\.?\d*)[時間hH]*',
+    ]
+    
+    all_patterns = [
+        ("表形式", table_patterns),
+        ("リスト形式", list_patterns),
+        ("縦形式", vertical_patterns)
+    ]
+    
+    for pattern_type, patterns in all_patterns:
+        for i, pattern in enumerate(patterns):
+            try:
+                matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+                if matches:
+                    debug_info.append(f"[{pattern_type}] パターン{i+1}でマッチ: {len(matches)}件")
+                    
+                    for match in matches:
+                        if isinstance(match, tuple) and len(match) == 2:
+                            name_candidate = match[0].strip()
+                            hours_candidate = match[1].strip()
+                            
+                            # 名前のクリーニング
+                            name_candidate = clean_employee_name(name_candidate)
+                            if is_valid_employee_name(name_candidate):
+                                try:
+                                    hours = float(hours_candidate)
+                                    if 10 <= hours <= 500:  # 妥当な勤務時間範囲
+                                        employees_data.append({
+                                            'name': name_candidate,
+                                            'hours': hours,
+                                            'pattern_type': pattern_type,
+                                            'pattern_index': i+1
+                                        })
+                                        debug_info.append(f"追加: {name_candidate} -> {hours}時間")
+                                except ValueError:
+                                    continue
+            except Exception as e:
+                debug_info.append(f"[{pattern_type}] パターン{i+1}でエラー: {str(e)}")
+                continue
+    
+    # 重複除去
+    unique_employees = remove_duplicate_employees(employees_data)
+    debug_info.append(f"重複除去後: {len(unique_employees)}人")
+    
+    return unique_employees, debug_info
+
+def clean_employee_name(name):
+    """社員名のクリーニング"""
+    # 不要な文字・記号を除去
+    name = re.sub(r'[│\|\t\n\r]+', ' ', name)  # 表の区切り文字等
+    name = re.sub(r'^[:\s：\-\=]+', '', name)   # 先頭の記号
+    name = re.sub(r'[:\s：\-\=]+$', '', name)   # 末尾の記号
+    name = re.sub(r'\d+[日月年]', '', name)     # 日付
+    name = re.sub(r'勤務|時間|合計|実績', '', name)  # 項目名
+    name = re.sub(r'\s+', '', name)  # 複数の空白を除去
+    
+    return name.strip()
+
+def is_valid_employee_name(name):
+    """社員名の妥当性チェック"""
+    if not name or len(name) < 2:
+        return False
+    if len(name) > 20:  # 長すぎる
+        return False
+    if re.match(r'^\d+$', name):  # 数字のみ
+        return False
+    if name in ['項目', '氏名', '社員名', '名前', '時間', '勤務', '合計', '実績', '承認', '社員', '勤務日数']:
+        return False
+    
+    # 日本語名前の基本パターン
+    if re.match(r'^[あ-んア-ン一-龯\s]+$', name):  # ひらがな・カタカナ・漢字
+        return True
+    if re.match(r'^[A-Za-z\s]+$', name):  # 英語名
+        return True
+    
+    return False
+
+def remove_duplicate_employees(employees_data):
+    """重複する社員データを除去"""
+    seen_names = {}
+    unique_employees = []
+    
+    for emp in employees_data:
+        name = emp['name']
+        if name not in seen_names:
+            seen_names[name] = emp
+            unique_employees.append(emp)
+        else:
+            # 既存のデータと比較
+            existing = seen_names[name]
+            if emp['pattern_type'] == '表形式' and existing['pattern_type'] != '表形式':
+                seen_names[name] = emp
+                for i, existing_emp in enumerate(unique_employees):
+                    if existing_emp['name'] == name:
+                        unique_employees[i] = emp
+                        break
+    
+    return unique_employees
+
 def extract_work_hours_smart(text):
-    """英語対応強化版 - スマートな勤務時間抽出機能"""
+    """単一人物用のスマート時間抽出（英語対応済み）"""
     debug_info = []
     all_matches = {}
     
@@ -214,8 +338,8 @@ def extract_employee_name(text):
     
     return "不明"
 
-def process_file(uploaded_file):
-    """アップロードされたファイルを処理"""
+def process_file_multi_person(uploaded_file):
+    """複数人対応版のファイル処理"""
     file_extension = uploaded_file.name.split('.')[-1].lower()
     
     if file_extension in ['png', 'jpg', 'jpeg', 'bmp', 'tiff']:
@@ -228,19 +352,35 @@ def process_file(uploaded_file):
     if error:
         return None, error
     
-    work_hours = extract_work_hours_smart(text)
-    employee_name = extract_employee_name(text)
+    # 複数人物として処理を試行
+    employees_data, debug_info = extract_multiple_employees_from_table(text)
     
-    return {
-        'raw_text': text,
-        'employee_name': employee_name,
-        'work_hours': work_hours,
-        'file_name': uploaded_file.name,
-        'processed_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }, None
+    # 複数人が検出された場合は表形式として処理
+    if len(employees_data) > 1:
+        return {
+            'type': 'multi_person',
+            'raw_text': text,
+            'employees': employees_data,
+            'file_name': uploaded_file.name,
+            'processed_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'debug_info': debug_info
+        }, None
+    else:
+        # 単一人物として処理
+        single_employee_name = extract_employee_name(text)
+        single_work_hours = extract_work_hours_smart(text)
+        
+        return {
+            'type': 'single_person', 
+            'raw_text': text,
+            'employee_name': single_employee_name,
+            'work_hours': single_work_hours,
+            'file_name': uploaded_file.name,
+            'processed_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }, None
 
-def create_excel_output(df):
-    """Excel出力用データを作成"""
+def create_excel_output_multi(df):
+    """複数人対応版Excel出力"""
     try:
         import openpyxl
         output = BytesIO()
@@ -252,8 +392,8 @@ def create_excel_output(df):
 
 def main():
     # ヘッダー
-    st.title("⏰ 勤務時間突合ツール（英語対応版）")
-    st.markdown("**日本語・英語両対応 - 優先順位付き時間抽出**")
+    st.title("⏰ 勤務時間突合ツール（複数人対応版）")
+    st.markdown("**表形式データから複数人の勤務時間を一括抽出 + 英語対応**")
     
     # システム状態
     with st.expander("🔧 システム情報"):
@@ -267,11 +407,11 @@ def main():
                 st.write("❌ PDFファイル (制限あり)")
         
         with col2:
-            st.write("**新機能:**")
+            st.write("**機能:**")
+            st.write("✅ 表形式複数人対応")
+            st.write("✅ 自動単一/複数判定")
             st.write("✅ 英語表記対応")
-            st.write("✅ Total Hours, Work Hours対応")
-            st.write("✅ Name: Suzuki Hanako対応")
-            st.write("✅ 168.0h形式対応")
+            st.write("✅ 複数人一括処理")
     
     st.markdown("---")
     
@@ -284,92 +424,114 @@ def main():
             "勤務実績ファイルを選択",
             type=['pdf', 'png', 'jpg', 'jpeg', 'bmp', 'tiff'] if PDF_SUPPORT else ['png', 'jpg', 'jpeg', 'bmp', 'tiff'],
             accept_multiple_files=True,
-            help="日本語・英語どちらにも対応"
+            help="単一人物・複数人物どちらにも対応"
         )
         
         # 処理ボタン
         if st.button("🔄 ファイルを処理", disabled=not uploaded_files, type="primary"):
-            process_files(uploaded_files)
+            process_files_multi(uploaded_files)
         
         # データクリアボタン
         if st.button("🗑️ 処理結果をクリア"):
             st.session_state.processed_files = []
-            if 'debug_info' in st.session_state:
-                st.session_state.debug_info = {}
         
         # 統計情報
         if st.session_state.processed_files:
             st.markdown("---")
             st.subheader("📊 処理統計")
-            st.metric("処理済みファイル", len(st.session_state.processed_files))
             
-            total_hours = sum([sum(f['work_hours']) for f in st.session_state.processed_files if f['work_hours']])
+            total_files = len(st.session_state.processed_files)
+            total_people = 0
+            total_hours = 0
+            
+            for file_data in st.session_state.processed_files:
+                if file_data['type'] == 'multi_person':
+                    total_people += len(file_data['employees'])
+                    total_hours += sum([emp['hours'] for emp in file_data['employees']])
+                else:
+                    total_people += 1
+                    total_hours += sum(file_data['work_hours']) if file_data['work_hours'] else 0
+            
+            st.metric("処理済みファイル", total_files)
+            st.metric("処理済み人数", total_people)
             st.metric("合計勤務時間", f"{total_hours:.1f}時間")
     
     # メインエリア
     if st.session_state.processed_files:
-        display_results()
+        display_results_multi()
     else:
         st.info("👆 サイドバーからファイルをアップロードして処理を開始してください")
         
         # 使用例
-        with st.expander("📖 英語対応について"):
+        with st.expander("📖 複数人対応機能について"):
             st.write("""
-            **新しく対応した英語フォーマット:**
+            **自動判定機能:**
+            - 単一人物データ: 従来通りの処理
+            - 複数人データ: 表形式として自動解析
+            
+            **対応する表形式:**
+            - 横並び表: │名前│勤務時間│
+            - リスト形式: 田中太郎 176.5時間
+            - 縦並び形式: 氏名:田中太郎 勤務時間:176.5時間
+            
+            **英語対応:**
             - Name: Suzuki Hanako
             - Total Hours: 168.0h
-            - Work Hours: 176.5h
-            - Working Hours: 154.5hours
-            
-            **既存の日本語フォーマット:**
-            - 氏名: 田中太郎
-            - 勤務時間: 176.5時間
-            - 合計: 168.0時間
             """)
 
-def process_files(uploaded_files):
-    """複数ファイルを処理"""
+def process_files_multi(uploaded_files):
+    """複数ファイルを処理（複数人対応版）"""
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     for i, uploaded_file in enumerate(uploaded_files):
         status_text.text(f"処理中: {uploaded_file.name} ({i+1}/{len(uploaded_files)})")
         
-        result, error = process_file(uploaded_file)
+        result, error = process_file_multi_person(uploaded_file)
         
         if error:
             st.error(f"❌ {uploaded_file.name}: {error}")
         else:
             st.session_state.processed_files.append(result)
-            work_hours_count = len(result['work_hours'])
-            work_hours_total = sum(result['work_hours']) if result['work_hours'] else 0
             
-            if work_hours_count > 0:
-                st.success(f"✅ {uploaded_file.name}: 処理完了（{work_hours_total:.1f}時間、{work_hours_count}個検出）")
+            if result['type'] == 'multi_person':
+                people_count = len(result['employees'])
+                total_hours = sum([emp['hours'] for emp in result['employees']])
+                st.success(f"✅ {uploaded_file.name}: 表形式処理完了（{people_count}人、合計{total_hours:.1f}時間）")
             else:
-                st.warning(f"⚠️ {uploaded_file.name}: 処理完了（時間データ未検出）")
+                work_hours_count = len(result['work_hours'])
+                work_hours_total = sum(result['work_hours']) if result['work_hours'] else 0
+                st.success(f"✅ {uploaded_file.name}: 単一人物処理完了（{work_hours_total:.1f}時間）")
         
         progress_bar.progress((i + 1) / len(uploaded_files))
     
     status_text.text("🎉 すべての処理が完了しました！")
 
-def display_results():
-    """処理結果を表示"""
+def display_results_multi():
+    """複数人対応版結果表示"""
     st.header("📊 処理結果")
     
     # 結果テーブル作成
     data = []
     for file_data in st.session_state.processed_files:
-        work_hours = file_data['work_hours']
-        total_hours = sum(work_hours) if work_hours else 0
-        
-        data.append({
-            'ファイル名': file_data['file_name'],
-            '社員名': file_data['employee_name'],
-            '勤務時間': f"{total_hours:.2f}時間" if total_hours > 0 else "未検出",
-            '検出数': len(work_hours),
-            '処理日時': file_data['processed_at']
-        })
+        if file_data['type'] == 'multi_person':
+            for emp in file_data['employees']:
+                data.append({
+                    'ファイル名': file_data['file_name'],
+                    '社員名': emp['name'],
+                    '勤務時間': f"{emp['hours']:.2f}時間",
+                    '処理方式': '表形式',
+                    '処理日時': file_data['processed_at']
+                })
+        else:
+            total_hours = sum(file_data['work_hours']) if file_data['work_hours'] else 0
+            data.append({
+                'ファイル名': file_data['file_name'],
+                '社員名': file_data['employee_name'],
+                '勤務時間': f"{total_hours:.2f}時間" if total_hours > 0 else "未検出",
+                '処理方式': '単一人物',
+                '処理日時': file_data['processed_at']
+            })
     
     df = pd.DataFrame(data)
     
@@ -378,63 +540,53 @@ def display_results():
     
     # Excel出力
     if st.button("📥 Excel出力"):
-        excel_data = create_excel_output(df)
+        excel_data = create_excel_output_multi(df)
         if excel_data:
             st.download_button(
                 label="💾 Excelファイルをダウンロード",
                 data=excel_data,
-                file_name=f"勤務時間突合結果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                file_name=f"勤務時間突合結果_複数人対応_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
             st.error("Excel出力機能が利用できません")
     
     # 詳細表示
-    if st.button("🔍 詳細表示＋英語デバッグ"):
+    if st.button("🔍 詳細表示＋複数人デバッグ"):
         st.subheader("🔍 詳細情報")
         
         for i, file_data in enumerate(st.session_state.processed_files):
             with st.expander(f"📁 {file_data['file_name']}", expanded=True):
-                col1, col2 = st.columns([1, 1])
-                
-                with col1:
-                    st.write(f"**社員名:** {file_data['employee_name']}")
-                    st.write(f"**処理日時:** {file_data['processed_at']}")
+                if file_data['type'] == 'multi_person':
+                    st.success(f"表形式処理: {len(file_data['employees'])}人検出")
                     
-                    if file_data['work_hours']:
-                        st.write(f"**選択された時間:** {file_data['work_hours']}")
-                        st.write(f"**合計時間:** {sum(file_data['work_hours']):.2f}時間")
-                        
-                        if len(file_data['work_hours']) > 1:
-                            main_value = max(file_data['work_hours'])
-                            st.info(f"💡 推奨メイン値: {main_value}時間")
-                    else:
-                        st.warning("勤務時間が検出されませんでした")
-                        
-                    # 英語デバッグ情報表示
-                    if 'debug_info' in st.session_state:
-                        text_key = file_data['raw_text'][:50]
-                        if text_key in st.session_state.debug_info:
-                            with st.expander("🧠 英語対応デバッグ情報"):
-                                for debug_line in st.session_state.debug_info[text_key]:
-                                    if 'Total Hours' in debug_line or 'Work Hours' in debug_line:
-                                        st.success(debug_line)
-                                    elif '最重要' in debug_line:
-                                        st.success(debug_line)
-                                    elif '高優先' in debug_line:
-                                        st.info(debug_line)
-                                    elif '決定' in debug_line:
-                                        st.warning(debug_line)
-                                    else:
-                                        st.text(debug_line)
+                    # 検出された人物一覧
+                    employees_df = pd.DataFrame([
+                        {'社員名': emp['name'], '勤務時間': f"{emp['hours']}時間", 
+                         'パターン': emp['pattern_type']} 
+                        for emp in file_data['employees']
+                    ])
+                    st.dataframe(employees_df, use_container_width=True, hide_index=True)
+                    
+                    # デバッグ情報
+                    with st.expander("🐛 表形式デバッグ情報"):
+                        for debug_line in file_data['debug_info']:
+                            st.text(debug_line)
                 
-                with col2:
-                    st.text_area(
-                        "抽出されたテキスト",
-                        file_data['raw_text'][:500] + "..." if len(file_data['raw_text']) > 500 else file_data['raw_text'],
-                        height=200,
-                        key=f"detail_text_{i}_{file_data['file_name']}"
-                    )
+                else:
+                    st.info("単一人物として処理")
+                    st.write(f"**社員名:** {file_data['employee_name']}")
+                    if file_data['work_hours']:
+                        st.write(f"**勤務時間:** {file_data['work_hours']}")
+                        st.write(f"**合計:** {sum(file_data['work_hours']):.2f}時間")
+                
+                # 元テキスト表示
+                st.text_area(
+                    "抽出されたテキスト",
+                    file_data['raw_text'][:500] + "..." if len(file_data['raw_text']) > 500 else file_data['raw_text'],
+                    height=200,
+                    key=f"detail_text_multi_{i}_{file_data['file_name']}"
+                )
 
 if __name__ == "__main__":
     main()
